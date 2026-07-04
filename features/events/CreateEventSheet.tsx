@@ -1,0 +1,312 @@
+import { Ionicons } from '@expo/vector-icons';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { useEffect } from 'react';
+import { Controller, useForm } from 'react-hook-form';
+import { KeyboardAvoidingView, Platform, ScrollView, Switch, Text, View } from 'react-native';
+
+import { EmojiPicker } from '@/components/events/EmojiPicker';
+import { BottomSheet } from '@/components/ui/BottomSheet';
+import { DateTimeField } from '@/components/ui/DateTimeField';
+import { Input } from '@/components/ui/Input';
+import { PrimaryButton } from '@/components/ui/PrimaryButton';
+import { useToast } from '@/components/ui/Toast';
+import { useAuth } from '@/hooks/useAuth';
+import { useLocation } from '@/hooks/useLocation';
+import { eventsService } from '@/services/events.service';
+import { useEventsStore } from '@/store/events.store';
+import { eventSchema, type EventInput } from '@/utils/validators';
+import type { LatLng } from '@/types';
+
+type Props = {
+  open: boolean;
+  onClose: () => void;
+  /** When set, the form pre-fills lat/lng from a map tap. */
+  seedCoords?: LatLng | null;
+};
+
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
+}
+
+function roundedHourISO(): string {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() < 30 ? 30 : 0, 0, 0);
+  if (d.getMinutes() === 0) d.setHours(d.getHours() + 1);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+const defaultValues: EventInput = {
+  title: '',
+  description: '',
+  emoji: '🎉',
+  latitude: 0,
+  longitude: 0,
+  event_date: todayISO(),
+  event_time: roundedHourISO(),
+  max_participants: null,
+  visibility: 'public',
+};
+
+export function CreateEventSheet({ open, onClose, seedCoords }: Props) {
+  const toast = useToast();
+  const { session } = useAuth();
+  const upsertEvent = useEventsStore((s) => s.upsertEvent);
+  const { coords: currentCoords, request } = useLocation();
+
+  const {
+    control,
+    handleSubmit,
+    reset,
+    setValue,
+    watch,
+    formState: { errors, isSubmitting },
+  } = useForm<EventInput>({
+    resolver: zodResolver(eventSchema),
+    defaultValues,
+  });
+
+  // When the sheet opens, seed lat/lng from either the tapped point or the
+  // user's current location.
+  useEffect(() => {
+    if (!open) return;
+    const start = seedCoords ?? currentCoords;
+    if (start) {
+      setValue('latitude', start.latitude);
+      setValue('longitude', start.longitude);
+    }
+  }, [open, seedCoords, currentCoords, setValue]);
+
+  const emoji = watch('emoji');
+  const visibility = watch('visibility');
+  const latitude = watch('latitude');
+  const longitude = watch('longitude');
+
+  const useCurrentLocation = async () => {
+    await request();
+    if (currentCoords) {
+      setValue('latitude', currentCoords.latitude);
+      setValue('longitude', currentCoords.longitude);
+      toast.show('Pinned to your location.', 'success');
+    }
+  };
+
+  const onSubmit = async (values: EventInput) => {
+    if (!session) return;
+    try {
+      const inserted = await eventsService.create({
+        creator_id: session.user.id,
+        title: values.title,
+        description: values.description || null,
+        emoji: values.emoji,
+        latitude: values.latitude,
+        longitude: values.longitude,
+        event_date: values.event_date,
+        event_time: values.event_time,
+        max_participants: values.max_participants ?? null,
+        visibility: values.visibility,
+      });
+      // Optimistically add — realtime will reconcile the exact shape moments later.
+      upsertEvent({
+        ...inserted,
+        creator: {
+          id: session.user.id,
+          username:
+            (session.user.user_metadata?.username as string | undefined) ?? 'you',
+          display_name:
+            (session.user.user_metadata?.display_name as string | undefined) ??
+            'You',
+          avatar_url:
+            (session.user.user_metadata?.avatar_url as string | undefined) ?? null,
+        },
+        participant_count: 0,
+        is_joined: false,
+      });
+      toast.show('Event pinned to the map.', 'success');
+      reset(defaultValues);
+      onClose();
+    } catch (e) {
+      toast.show(e instanceof Error ? e.message : 'Could not create event', 'error');
+    }
+  };
+
+  return (
+    <BottomSheet open={open} onClose={onClose} heightPct={0.92}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        className="flex-1"
+      >
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ paddingBottom: 24, gap: 18 }}
+        >
+          <Text className="text-2xl font-bold text-text-light dark:text-text-dark">
+            Pin an event
+          </Text>
+
+          <Controller
+            control={control}
+            name="title"
+            render={({ field: { value, onChange, onBlur } }) => (
+              <Input
+                label="Title"
+                placeholder="e.g. Coffee & croissants"
+                value={value}
+                onChangeText={onChange}
+                onBlur={onBlur}
+                error={errors.title?.message}
+              />
+            )}
+          />
+
+          <View>
+            <Text className="mb-2 text-sm font-medium text-text-light dark:text-text-dark">
+              Emoji
+            </Text>
+            <EmojiPicker value={emoji} onChange={(v) => setValue('emoji', v)} />
+            {errors.emoji?.message ? (
+              <Text className="mt-1.5 text-xs text-red-500">{errors.emoji.message}</Text>
+            ) : null}
+          </View>
+
+          <Controller
+            control={control}
+            name="description"
+            render={({ field: { value, onChange, onBlur } }) => (
+              <Input
+                label="Description"
+                placeholder="Anything attendees should know."
+                value={value ?? ''}
+                onChangeText={onChange}
+                onBlur={onBlur}
+                multiline
+                error={errors.description?.message}
+              />
+            )}
+          />
+
+          <View className="flex-row gap-3">
+            <View className="flex-1">
+              <Controller
+                control={control}
+                name="event_date"
+                render={({ field: { value, onChange } }) => (
+                  <DateTimeField
+                    mode="date"
+                    label="Date"
+                    value={value}
+                    onChange={onChange}
+                    error={errors.event_date?.message}
+                  />
+                )}
+              />
+            </View>
+            <View className="flex-1">
+              <Controller
+                control={control}
+                name="event_time"
+                render={({ field: { value, onChange } }) => (
+                  <DateTimeField
+                    mode="time"
+                    label="Time"
+                    value={value}
+                    onChange={onChange}
+                    error={errors.event_time?.message}
+                  />
+                )}
+              />
+            </View>
+          </View>
+
+          <View>
+            <Text className="mb-1.5 text-sm font-medium text-text-light dark:text-text-dark">
+              Location
+            </Text>
+            <View className="rounded-2xl border border-border-light bg-elevated-light p-4 dark:border-border-dark dark:bg-elevated-dark">
+              <Text className="text-xs text-muted-light dark:text-muted-dark">
+                {latitude && longitude
+                  ? `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
+                  : 'Not set'}
+              </Text>
+              <View className="mt-3 flex-row gap-2">
+                <View className="flex-1">
+                  <PrimaryButton
+                    label="Use current location"
+                    variant="secondary"
+                    size="sm"
+                    leftIcon={<Ionicons name="navigate" size={14} color="#3757FF" />}
+                    onPress={useCurrentLocation}
+                    fullWidth
+                  />
+                </View>
+              </View>
+              <Text className="mt-2 text-[11px] text-muted-light dark:text-muted-dark">
+                Tip: tap anywhere on the map to drop a pin, then reopen this sheet.
+              </Text>
+            </View>
+            {errors.latitude?.message || errors.longitude?.message ? (
+              <Text className="mt-1.5 text-xs text-red-500">
+                {errors.latitude?.message ?? errors.longitude?.message}
+              </Text>
+            ) : null}
+          </View>
+
+          <Controller
+            control={control}
+            name="max_participants"
+            render={({ field: { value, onChange } }) => (
+              <Input
+                label="Maximum participants (optional)"
+                keyboardType="number-pad"
+                placeholder="No cap"
+                value={value == null ? '' : String(value)}
+                onChangeText={(t) => {
+                  const n = Number(t.replace(/[^0-9]/g, ''));
+                  onChange(Number.isFinite(n) && n > 0 ? n : null);
+                }}
+                error={errors.max_participants?.message}
+              />
+            )}
+          />
+
+          <View className="flex-row items-center justify-between rounded-2xl border border-border-light bg-elevated-light p-4 dark:border-border-dark dark:bg-elevated-dark">
+            <View className="flex-1 pr-4">
+              <Text className="text-sm font-semibold text-text-light dark:text-text-dark">
+                Private event
+              </Text>
+              <Text className="mt-1 text-xs text-muted-light dark:text-muted-dark">
+                Only you can see private events. Share the link to invite others.
+              </Text>
+            </View>
+            <Switch
+              value={visibility === 'private'}
+              onValueChange={(v) => setValue('visibility', v ? 'private' : 'public')}
+              trackColor={{ true: '#3757FF' }}
+            />
+          </View>
+
+          <View className="flex-row gap-3 pt-2">
+            <View className="flex-1">
+              <PrimaryButton
+                label="Cancel"
+                variant="secondary"
+                onPress={onClose}
+                fullWidth
+              />
+            </View>
+            <View className="flex-1">
+              <PrimaryButton
+                label="Create event"
+                onPress={handleSubmit(onSubmit)}
+                loading={isSubmitting}
+                fullWidth
+              />
+            </View>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </BottomSheet>
+  );
+}
