@@ -55,7 +55,8 @@
       "expo-asset"
     ],
     "experiments": {
-      "typedRoutes": true
+      "typedRoutes": true,
+      "baseUrl": "/mapmeet"
     },
     "extra": {
       "supabaseUrl": "",

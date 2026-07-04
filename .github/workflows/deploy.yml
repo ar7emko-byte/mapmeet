@@ -1,0 +1,67 @@
+name: Deploy web to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages uses OIDC + a queue keyed on the environment. `concurrency: pages`
+# cancels the older deploy if a new push arrives mid-flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Client-safe values embedded into the bundle. The anon key is scoped
+      # by Postgres RLS; the URL is public. Both are read at build time by
+      # services/supabase.ts. Move to `vars.` if you'd rather manage them
+      # in the repo settings.
+      EXPO_PUBLIC_SUPABASE_URL: ${{ vars.EXPO_PUBLIC_SUPABASE_URL }}
+      EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci --legacy-peer-deps
+
+      - name: Build web bundle
+        run: npm run build:web
+
+      - name: SPA + Jekyll shims
+        # GitHub Pages runs everything through Jekyll unless we say otherwise,
+        # which drops files starting with `_`. Expo's chunks live under
+        # `_expo/`, so `.nojekyll` is not optional.
+        # 404.html is Pages' way to support client-side routing on a project
+        # site — any unknown path (e.g. /mapmeet/reset) gets served the SPA.
+        run: |
+          touch dist/.nojekyll
+          cp dist/index.html dist/404.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
